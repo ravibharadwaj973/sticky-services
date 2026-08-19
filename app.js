@@ -52,9 +52,14 @@ app.get('/health', (req, res) => {
   res.json({ service: 'todo-service', status: 'ok' });
 });
 
-// Routes
+// Routes.
+// Everything this service owns lives under /api/todos, so nginx can route the
+// whole service with one `location /api/todos` rule. It deliberately does NOT
+// serve /api/admin — the core backend owns that prefix, and both claiming
+// /api/admin/stats made them impossible to tell apart behind one proxy.
+// Admin is mounted first so /api/todos/admin/* never reaches the /:id handler.
+app.use('/api/todos/admin', adminTodosRoutes);
 app.use('/api/todos', todosRoutes);
-app.use('/api/admin', adminTodosRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Route not found' });

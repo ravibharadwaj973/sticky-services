@@ -195,10 +195,20 @@ describe('Todo Service', () => {
     });
   });
 
+  // Everything this service owns lives under /api/todos so nginx can route it
+  // with a single prefix. /api/admin belongs to the core backend.
   describe('admin routes', () => {
-    it('rejects a normal user token on /api/admin/todos', async () => {
+    it('does not claim /api/admin — that prefix is the core backend\'s', async () => {
       const response = await request(app)
-        .get('/api/admin/todos')
+        .get('/api/admin/stats')
+        .set('Authorization', `Bearer ${adminToken()}`);
+
+      expect(response.status).toBe(404);
+    });
+
+    it('rejects a normal user token on /api/todos/admin/all', async () => {
+      const response = await request(app)
+        .get('/api/todos/admin/all')
         .set('Authorization', `Bearer ${userToken()}`);
 
       expect(response.status).toBe(403);
@@ -211,7 +221,7 @@ describe('Todo Service', () => {
       });
 
       const response = await request(app)
-        .get('/api/admin/todos')
+        .get('/api/todos/admin/all')
         .set('Authorization', `Bearer ${adminToken()}`);
 
       expect(response.status).toBe(200);
@@ -222,7 +232,7 @@ describe('Todo Service', () => {
       Todo.countDocuments.mockResolvedValueOnce(10).mockResolvedValueOnce(4);
 
       const response = await request(app)
-        .get('/api/admin/stats')
+        .get('/api/todos/admin/stats')
         .set('Authorization', `Bearer ${adminToken()}`);
 
       expect(response.status).toBe(200);
@@ -233,11 +243,34 @@ describe('Todo Service', () => {
       Todo.findByIdAndDelete.mockResolvedValue({ _id: 't1' });
 
       const response = await request(app)
-        .delete('/api/admin/todos/t1')
+        .delete('/api/todos/admin/t1')
         .set('Authorization', `Bearer ${adminToken()}`);
 
       expect(response.status).toBe(200);
       expect(Todo.findByIdAndDelete).toHaveBeenCalledWith('t1');
+    });
+
+    // Two segments, so it must not be swallowed by the DELETE /:id above.
+    it('wipes one user\'s todos without colliding with delete-any-todo', async () => {
+      Todo.deleteMany.mockResolvedValue({ deletedCount: 3 });
+
+      const response = await request(app)
+        .delete('/api/todos/admin/users/u1')
+        .set('Authorization', `Bearer ${adminToken()}`);
+
+      expect(response.status).toBe(200);
+      expect(Todo.deleteMany).toHaveBeenCalledWith({ user: 'u1' });
+      expect(Todo.findByIdAndDelete).not.toHaveBeenCalled();
+    });
+
+    // /api/todos/admin/... must never be captured by GET /api/todos/:id
+    it('does not let the admin prefix fall through to the :id handler', async () => {
+      const response = await request(app)
+        .get('/api/todos/admin/stats')
+        .set('Authorization', `Bearer ${userToken()}`);
+
+      expect(response.status).toBe(403);
+      expect(Todo.findOne).not.toHaveBeenCalled();
     });
   });
 });

@@ -3,7 +3,10 @@ const Todo = require('../model/Todo');
 const { requireAdmin } = require('../middleware/adminAuth');
 
 const router = express.Router();
-//route/admin (todo-service)
+//route/todos/admin (todo-service)
+//
+// Mounted at /api/todos/admin. Paths here are relative to that, so the full
+// set is /api/todos/admin/stats, /all, /:id and /users/:userId.
 
 // Counters for the admin dashboard tile
 router.get('/stats', requireAdmin, async (req, res) => {
@@ -27,7 +30,7 @@ router.get('/stats', requireAdmin, async (req, res) => {
 });
 
 // Every user's todos
-router.get('/todos', requireAdmin, async (req, res) => {
+router.get('/all', requireAdmin, async (req, res) => {
   try {
     const todos = await Todo.find().sort({ createdAt: -1 }).limit(200).lean();
 
@@ -39,7 +42,7 @@ router.get('/todos', requireAdmin, async (req, res) => {
 });
 
 // Delete any todo, regardless of owner
-router.delete('/todos/:id', requireAdmin, async (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     const todo = await Todo.findByIdAndDelete(req.params.id);
 
@@ -54,8 +57,9 @@ router.delete('/todos/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// Wipe a user's todos — called when the core backend deletes that user
-router.delete('/users/:id/todos', requireAdmin, async (req, res) => {
+// Wipe a user's todos — called when the core backend deletes that user.
+// Two segments, so it can never be confused with /:id above.
+router.delete('/users/:id', requireAdmin, async (req, res) => {
   try {
     const result = await Todo.deleteMany({ user: req.params.id });
 
