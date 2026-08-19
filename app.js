@@ -6,6 +6,7 @@ require('dotenv').config();
 const todosRoutes = require('./routes/todos');
 const adminTodosRoutes = require('./routes/adminTodos');
 const connectDB = require('./lib/dbConnect');
+const { loadSecrets } = require('./lib/secrets');
 
 const app = express();
 
@@ -41,11 +42,6 @@ app.use(cors({
   credentials: true,
 }));
 
-// Database connection
-if (process.env.NODE_ENV !== 'test') {
-  connectDB();
-}
-
 app.use((req, res, next) => {
   console.log('[todo-service]', req.method, req.originalUrl);
   next();
@@ -70,11 +66,30 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-if (process.env.NODE_ENV !== 'test') {
+// Secrets first (they carry MONGODB_URI and JWT_SECRET), then the database,
+// then start listening. Nothing serves traffic until the config is settled.
+const start = async () => {
+  try {
+    const { source } = await loadSecrets();
+    // Printed on every boot so CloudWatch shows at a glance whether this
+    // container is on the real secret or on a .env that got baked in.
+    console.log(`[todo-service] config source: ${source}`);
+  } catch (error) {
+    console.error('[todo-service][secrets]', error.message);
+    console.error('[todo-service][secrets] Refusing to start on possibly stale .env values.');
+    process.exit(1);
+  }
+
+  connectDB();
+
   const PORT = process.env.PORT || 5001;
   app.listen(PORT, () => {
     console.log(`[todo-service] Server running on port ${PORT}`);
   });
+};
+
+if (process.env.NODE_ENV !== 'test') {
+  start();
 }
 
 module.exports = app;

@@ -1,0 +1,193 @@
+const mockSend = jest.fn();
+
+jest.mock('@aws-sdk/client-secrets-manager', () => ({
+  SecretsManagerClient: jest.fn(() => ({ send: mockSend })),
+  GetSecretValueCommand: jest.fn((input) => ({ input })),
+}));
+
+const { loadSecrets } = require('../lib/secrets');
+const { SecretsManagerClient } = require('@aws-sdk/client-secrets-manager');
+
+// Deliberately the same shape the core backend uses — both services share one
+// secret, and this service picks out only the two keys it needs.
+const SECRET_JSON = JSON.stringify({
+  JWT_SECRET: 'from-secrets-manager',
+  MONGODB_URI: 'mongodb+srv://secret-host/db',
+  ADMIN_EMAIL: 'admin@secret.com',
+  ADMIN_PASSWORD: 'secret-password',
+});
+
+describe('loadSecrets (todo-service)', () => {
+  let savedEnv;
+  let logSpy;
+
+  beforeEach(() => {
+    savedEnv = { ...process.env };
+    jest.clearAllMocks();
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    delete process.env.AWS_SECRET_NAME;
+    delete process.env.JWT_SECRET;
+    delete process.env.MONGODB_URI;
+    delete process.env.ADMIN_EMAIL;
+    delete process.env.ADMIN_PASSWORD;
+    process.env.AWS_REGION = 'ap-south-1';
+  });
+
+  afterEach(() => {
+    process.env = savedEnv;
+    logSpy.mockRestore();
+  });
+
+  describe('when AWS_SECRET_NAME is not set', () => {
+    it('leaves .env values alone and never calls AWS', async () => {
+      process.env.JWT_SECRET = 'from-dotenv';
+      process.env.MONGODB_URI = 'mongodb://localhost:27017/dev';
+
+      const result = await loadSecrets();
+
+      expect(result).toEqual({ source: 'env', keys: [] });
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(process.env.JWT_SECRET).toBe('from-dotenv');
+    });
+
+    // The exact production bug: the service came up on .env values because
+    // AWS_SECRET_NAME was never set on this service, and nothing complained.
+    it('refuses to start in production rather than silently using .env', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'baked-into-the-image';
+      process.env.MONGODB_URI = 'mongodb://baked-into-the-image/db';
+
+      await expect(loadSecrets()).rejects.toThrow(/AWS_SECRET_NAME is not set/);
+      await expect(loadSecrets()).rejects.toThrow(/sticky-keys/);
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    it('still allows the .env fallback outside production', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.JWT_SECRET = 'from-dotenv';
+      process.env.MONGODB_URI = 'mongodb://localhost:27017/dev';
+
+      await expect(loadSecrets()).resolves.toEqual({ source: 'env', keys: [] });
+    });
+
+    it('still refuses to boot when .env is missing a required key', async () => {
+      process.env.MONGODB_URI = 'mongodb://localhost:27017/dev';
+      // JWT_SECRET deliberately absent — booting without it would 401 every request
+
+      await expect(loadSecrets()).rejects.toThrow(
+        'Missing required config from .env: JWT_SECRET'
+      );
+    });
+  });
+
+  describe('when AWS_SECRET_NAME is set', () => {
+    beforeEach(() => {
+      process.env.AWS_SECRET_NAME = 'sticky-keys';
+    });
+
+    it('takes only the two keys this service needs', async () => {
+      mockSend.mockResolvedValue({ SecretString: SECRET_JSON });
+
+      const result = await loadSecrets();
+
+      expect(result.keys).toEqual(['JWT_SECRET', 'MONGODB_URI']);
+      expect(process.env.JWT_SECRET).toBe('from-secrets-manager');
+      expect(process.env.MONGODB_URI).toBe('mongodb+srv://secret-host/db');
+      // admin credentials belong to the core backend, not here
+      expect(process.env.ADMIN_PASSWORD).toBeUndefined();
+    });
+
+    it('ends up with the same JWT_SECRET the core backend would load', async () => {
+      mockSend.mockResolvedValue({ SecretString: SECRET_JSON });
+
+      await loadSecrets();
+
+      expect(process.env.JWT_SECRET).toBe(JSON.parse(SECRET_JSON).JWT_SECRET);
+    });
+
+    it('overrides values that .env already set', async () => {
+      process.env.JWT_SECRET = 'stale-from-dotenv';
+      mockSend.mockResolvedValue({ SecretString: SECRET_JSON });
+
+      await loadSecrets();
+
+      expect(process.env.JWT_SECRET).toBe('from-secrets-manager');
+    });
+
+    it('passes the secret name through to AWS and uses AWS_REGION', async () => {
+      mockSend.mockResolvedValue({ SecretString: SECRET_JSON });
+
+      await loadSecrets();
+
+      expect(mockSend).toHaveBeenCalledWith(
+        expect.objectContaining({ input: { SecretId: 'sticky-keys' } })
+      );
+      expect(SecretsManagerClient).toHaveBeenCalledWith(
+        expect.objectContaining({ region: 'ap-south-1' })
+      );
+    });
+
+    it('never passes explicit credentials, even if keys are in the environment', async () => {
+      // Runs on EC2: the SDK must resolve the instance's IAM role on its own.
+      process.env.AWS_ACCESS_KEY_ID = 'AKIA-should-be-ignored';
+      process.env.AWS_SECRET_ACCESS_KEY = 'should-be-ignored';
+      mockSend.mockResolvedValue({ SecretString: SECRET_JSON });
+
+      await loadSecrets();
+
+      expect(SecretsManagerClient).toHaveBeenCalledWith({ region: 'ap-south-1' });
+    });
+
+    it('reads SecretBinary when SecretString is absent', async () => {
+      mockSend.mockResolvedValue({ SecretBinary: Buffer.from(SECRET_JSON, 'utf8') });
+
+      await loadSecrets();
+
+      expect(process.env.JWT_SECRET).toBe('from-secrets-manager');
+    });
+
+    it('never logs the secret values', async () => {
+      mockSend.mockResolvedValue({ SecretString: SECRET_JSON });
+
+      await loadSecrets();
+
+      const logged = logSpy.mock.calls.flat().join(' ');
+      expect(logged).toContain('JWT_SECRET');
+      expect(logged).not.toContain('from-secrets-manager');
+    });
+
+    it('throws when AWS_REGION is missing', async () => {
+      delete process.env.AWS_REGION;
+
+      await expect(loadSecrets()).rejects.toThrow('AWS_REGION is missing');
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    it('throws when AWS rejects the call', async () => {
+      mockSend.mockRejectedValue(new Error('AccessDeniedException'));
+
+      await expect(loadSecrets()).rejects.toThrow(/Could not fetch .* AccessDeniedException/);
+    });
+
+    it('throws when the secret is empty', async () => {
+      mockSend.mockResolvedValue({});
+
+      await expect(loadSecrets()).rejects.toThrow('is empty');
+    });
+
+    it('throws when the secret is not valid JSON', async () => {
+      mockSend.mockResolvedValue({ SecretString: 'not-json' });
+
+      await expect(loadSecrets()).rejects.toThrow('not valid JSON');
+    });
+
+    it('throws when a required key is missing from the secret', async () => {
+      mockSend.mockResolvedValue({ SecretString: JSON.stringify({ MONGODB_URI: 'y' }) });
+
+      await expect(loadSecrets()).rejects.toThrow(
+        /Missing required config from secret "sticky-keys": JWT_SECRET/
+      );
+    });
+  });
+});

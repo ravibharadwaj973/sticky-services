@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { getJwtSecret } = require('../lib/config');
 //middleware/auth
 
 // This service does not issue tokens — the core backend does. Both share
@@ -26,7 +27,7 @@ const requireAuth = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, getJwtSecret());
 
     if (!decoded.userId) {
       return res.status(401).json({ error: 'Unauthorized' });
